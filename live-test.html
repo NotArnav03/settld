@@ -110,7 +110,13 @@
     0xb774f2…6F39
   </a>
   &nbsp;·&nbsp; negotiation feed
-  <span id="worker-status"><span class="status-dot dot-wait"></span>waiting for worker.ts on :4021…</span>
+  <span id="worker-status"><span class="status-dot dot-wait"></span>waiting for worker.ts…</span>
+</div>
+
+<div class="sub" style="margin-top:-0.75rem; margin-bottom:1.5rem;">
+  backend URL (worker.ts's address — <code>http://127.0.0.1:4021</code> if it's on this machine, or a tunnel URL if it's remote):
+  <input id="backend-url-input" type="text" placeholder="http://127.0.0.1:4021" style="background:#14171a; border:1px solid #2a2e34; color:#e6e8eb; border-radius:6px; padding:0.3rem 0.6rem; font-family:inherit; font-size:0.8rem; width:280px;">
+  <button id="backend-url-set" style="background:#1f2937; border:1px solid #2a2e34; color:#e6e8eb; border-radius:6px; padding:0.3rem 0.7rem; font-family:inherit; font-size:0.8rem; cursor:pointer;">Connect</button>
 </div>
 
 <div class="grid">
@@ -164,8 +170,26 @@ const monadTestnet = defineChain({
 });
 
 const CONTRACT_ADDRESS = "0xb774f275b73a02D3E89F58cDb3f48a6e6feA6F39";
-const NEGOTIATION_URL = "http://127.0.0.1:4021/transcript";
-const VERDICT_URL = "http://127.0.0.1:4021/verdict";
+
+// Configurable so this deployed page can point at worker.ts wherever it's
+// actually running — 127.0.0.1 only ever means "whoever is viewing this
+// page," which is fine for local testing but means nobody else watching the
+// deployed URL sees the negotiation/verdict feeds unless the presenter's
+// own worker.ts is exposed via a public tunnel and its URL is entered here.
+// Persisted in localStorage so it survives a refresh on the same browser.
+let backendBaseUrl = localStorage.getItem("settld-backend-url") || "http://127.0.0.1:4021";
+
+const backendInput = document.getElementById("backend-url-input");
+const backendSetBtn = document.getElementById("backend-url-set");
+backendInput.value = backendBaseUrl;
+backendSetBtn.addEventListener("click", () => {
+  const value = backendInput.value.trim().replace(/\/$/, "");
+  if (!value) return;
+  backendBaseUrl = value;
+  localStorage.setItem("settld-backend-url", backendBaseUrl);
+  lastTranscriptLength = -1; // force a re-render on the next successful poll
+  lastVerdictsLength = -1;
+});
 
 const abi = [
   {
@@ -346,7 +370,7 @@ function renderTranscript(entries) {
 
 async function pollTranscript() {
   try {
-    const res = await fetch(NEGOTIATION_URL);
+    const res = await fetch(`${backendBaseUrl}/transcript`);
     if (res.ok) {
       workerStatusEl.innerHTML = '<span class="status-dot dot-live"></span>worker.ts connected';
       const entries = await res.json();
@@ -356,7 +380,7 @@ async function pollTranscript() {
       }
     }
   } catch (err) {
-    workerStatusEl.innerHTML = '<span class="status-dot dot-off"></span>worker.ts not reachable on :4021';
+    workerStatusEl.innerHTML = '<span class="status-dot dot-off"></span>worker.ts not reachable — check the backend URL above';
   } finally {
     setTimeout(pollTranscript, 1000);
   }
@@ -390,7 +414,7 @@ function renderVerdicts(entries) {
 
 async function pollVerdicts() {
   try {
-    const res = await fetch(VERDICT_URL);
+    const res = await fetch(`${backendBaseUrl}/verdict`);
     if (res.ok) {
       const entries = await res.json();
       if (entries.length !== lastVerdictsLength) {
