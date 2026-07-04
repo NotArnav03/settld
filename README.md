@@ -40,9 +40,7 @@ The obvious question, once you know Monad shipped agent tooling of its own: why 
 
 **x402 and the Machine Payments Protocol** are excellent at what they do — instant, metered, pay-per-call settlement. But they only do that. There is no concept of *holding* funds pending a judgment call, which means there is no way to say "pay only if the work is actually good" or "refund automatically if nothing arrives by Tuesday." That's not a gap in their design; it's outside their scope. It's also exactly the problem this project exists to solve.
 
-**ERC-8004**, Monad's identity-and-reputation standard for autonomous agents, was the more interesting temptation — until `cast code` against the two registry addresses on Monad testnet returned `0x`. Real bytecode exists on mainnet; none exists on testnet, where this whole build lives on faucet MON with zero real-money risk. Wiring a live demo to a contract that doesn't exist on the network it's deployed to is how hackathon demos die on stage. So ERC-8004 stays out of the code and in this document, as work worth doing the moment it's live where we are.
-
-What was left, once both were ruled out honestly, was the one piece neither of them claims to solve: a deterministic hold-then-release state machine that two agents can trust without trusting each other. That's `Settld.sol`.
+What was left, once that was ruled out honestly, was the one piece it doesn't claim to solve: a deterministic hold-then-release state machine that two agents can trust without trusting each other. That's `Settld.sol`.
 
 ## The contract
 

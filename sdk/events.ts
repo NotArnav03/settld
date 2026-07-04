@@ -35,6 +35,17 @@ export function watchSettldEvents(
   }
   const address = CONTRACT_ADDRESS;
 
+  // Monad's public RPC hard-caps eth_getLogs at a 100-block range. Discovered
+  // live: if a poll times out, fromBlock doesn't advance, so the gap to
+  // `latest` keeps growing on every retry until it exceeds this cap — at
+  // which point every subsequent attempt fails immediately (not a timeout,
+  // a hard rejection) and the loop is permanently stuck, since nothing ever
+  // advances fromBlock on an error. Capping the requested span, independent
+  // of how far behind `latest` has drifted, means each request is always
+  // valid on its own and the loop self-heals by catching up over several
+  // poll cycles instead of ever asking for one huge range.
+  const MAX_BLOCK_SPAN = 99n; // inclusive fromBlock..fromBlock+99 = 100 blocks
+
   let stopped = false;
   let fromBlock: bigint | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -48,17 +59,18 @@ export function watchSettldEvents(
         // First tick: establish the baseline, don't fetch historical logs.
         fromBlock = latest + 1n;
       } else if (latest >= fromBlock) {
+        const toBlock = latest - fromBlock > MAX_BLOCK_SPAN ? fromBlock + MAX_BLOCK_SPAN : latest;
         const logs = await agent.publicClient.getContractEvents({
           address,
           abi: settldAbi,
           fromBlock,
-          toBlock: latest,
+          toBlock,
         });
         for (const log of logs) {
           const decoded = log as typeof log & { eventName: SettldEventName; args: Record<string, unknown> };
           onEvent({ name: decoded.eventName, args: decoded.args, log });
         }
-        fromBlock = latest + 1n;
+        fromBlock = toBlock + 1n;
       }
     } catch (err) {
       onError?.(err as Error);

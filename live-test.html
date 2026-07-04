@@ -1,0 +1,413 @@
+<!--
+  Temporary test dashboard — NOT the real Layer 5 frontend (that's being
+  built separately on the `frontend` branch). This is a single throwaway
+  HTML file so you can watch the backend actually run: live on-chain escrow
+  state from Monad testnet, plus the negotiation transcript polled from
+  worker.ts's local HTTP server.
+
+  How to run:
+    1. npx tsx agents/worker.ts     (in one terminal — starts the negotiation
+                                     server on :4021 and begins watching)
+    2. npx serve .                  (in another terminal, from the project root —
+                                     or `python -m http.server 8000`)
+    3. Open the served URL + /live-test.html in your browser
+    4. npx tsx agents/hirer.ts      (in a third terminal — this triggers everything)
+
+  Watch the browser update live as negotiation happens and the escrow moves
+  through Created -> Submitted -> Released.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Settld — Live Test Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: #0b0d10;
+    color: #e6e8eb;
+    padding: 2rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.25rem; color: #fff; }
+  .sub { color: #8a8f98; font-size: 0.85rem; margin-bottom: 1.5rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: #14171a;
+    border: 1px solid #2a2e34;
+    border-radius: 10px;
+    padding: 1.25rem;
+  }
+  .panel h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: #8a8f98; margin: 0 0 1rem; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot-live { background: #3fd67a; box-shadow: 0 0 6px #3fd67a; }
+  .dot-off { background: #d64f4f; }
+  .dot-wait { background: #d6b83f; }
+
+  .steps { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  .step {
+    flex: 1;
+    text-align: center;
+    padding: 0.6rem 0.25rem;
+    border-radius: 6px;
+    border: 1px solid #2a2e34;
+    color: #5b6169;
+    font-size: 0.78rem;
+    position: relative;
+  }
+  .step.active { border-color: #3fd67a; color: #3fd67a; background: rgba(63,214,122,0.08); }
+  .step.done { border-color: #3f7dd6; color: #7fb2ef; }
+  .step.refunded { border-color: #d68a3f; color: #f0b273; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.35rem 1rem; font-size: 0.85rem; }
+  .kv dt { color: #8a8f98; }
+  .kv dd { margin: 0; word-break: break-all; }
+  .mono-amount { color: #3fd67a; font-weight: 600; }
+
+  .flow { display: flex; align-items: center; justify-content: space-between; margin-top: 1rem; gap: 0.5rem; }
+  .flow .box { flex: 1; text-align: center; border: 1px solid #2a2e34; border-radius: 8px; padding: 0.8rem; }
+  .flow .box .label { color: #8a8f98; font-size: 0.72rem; text-transform: uppercase; }
+  .flow .box .amt { font-size: 1.1rem; margin-top: 0.2rem; }
+  .flow .arrow { color: #5b6169; font-size: 1.3rem; transition: color 0.3s; }
+  .flow .arrow.hot { color: #3fd67a; }
+
+  .verdict-card { border-left: 3px solid #2a2e34; padding: 0.6rem 0 0.6rem 0.9rem; }
+  .verdict-card + .verdict-card { margin-top: 0.9rem; }
+  .verdict-card.pass { border-color: #3fd67a; }
+  .verdict-card.fail { border-color: #d64f4f; }
+  .verdict-card .label { color: #8a8f98; font-size: 0.72rem; text-transform: uppercase; margin-top: 0.5rem; }
+  .verdict-card .task-text { font-size: 0.9rem; margin: 0.15rem 0 0; }
+  .verdict-card .deliverable-text { font-size: 0.85rem; color: #cfd3d9; margin: 0.15rem 0 0; white-space: pre-wrap; }
+  .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.03em; }
+  .badge.pass { background: rgba(63,214,122,0.15); color: #3fd67a; }
+  .badge.fail { background: rgba(214,79,79,0.15); color: #f08080; }
+  .verdict-card .reasoning { font-size: 0.85rem; color: #b7bbc2; margin-top: 0.3rem; font-style: italic; }
+
+  .transcript { display: flex; flex-direction: column; gap: 0.6rem; max-height: 340px; overflow-y: auto; }
+  .turn { border-left: 3px solid #2a2e34; padding: 0.4rem 0 0.4rem 0.75rem; font-size: 0.85rem; }
+  .turn.hirer { border-color: #3f7dd6; }
+  .turn.worker { border-color: #d68a3f; }
+  .turn .who { font-weight: 600; }
+  .turn .who.hirer-c { color: #7fb2ef; }
+  .turn .who.worker-c { color: #f0b273; }
+  .turn .msg { color: #b7bbc2; margin-top: 0.15rem; }
+  .empty { color: #5b6169; font-size: 0.85rem; padding: 1rem 0; }
+
+  .log { max-height: 160px; overflow-y: auto; font-size: 0.78rem; color: #6c7280; margin-top: 1rem; border-top: 1px solid #2a2e34; padding-top: 0.75rem; }
+</style>
+</head>
+<body>
+
+<h1>Settld — Live Test Dashboard</h1>
+<div class="sub">
+  <span id="chain-status"><span class="status-dot dot-wait"></span>connecting to Monad testnet…</span>
+  &nbsp;·&nbsp; contract
+  <a href="https://testnet.monadexplorer.com/address/0xb774f275b73a02D3E89F58cDb3f48a6e6feA6F39" target="_blank" style="color:#7fb2ef">
+    0xb774f2…6F39
+  </a>
+  &nbsp;·&nbsp; negotiation feed
+  <span id="worker-status"><span class="status-dot dot-wait"></span>waiting for worker.ts on :4021…</span>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Escrow state machine</h2>
+    <div class="steps">
+      <div class="step" data-step="1">Created</div>
+      <div class="step" data-step="2">Submitted</div>
+      <div class="step" data-step="3">Released</div>
+    </div>
+    <dl class="kv" id="escrow-kv">
+      <dt>escrow id</dt><dd>—</dd>
+      <dt>hirer</dt><dd>—</dd>
+      <dt>worker</dt><dd>—</dd>
+      <dt>amount</dt><dd>—</dd>
+      <dt>status</dt><dd>waiting for an escrow…</dd>
+    </dl>
+
+    <div class="flow">
+      <div class="box"><div class="label">Hirer</div><div class="amt" id="flow-hirer">—</div></div>
+      <div class="arrow" id="flow-arrow">→</div>
+      <div class="box"><div class="label">Worker</div><div class="amt" id="flow-worker">—</div></div>
+    </div>
+
+    <div class="log" id="event-log"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Negotiation transcript</h2>
+    <div class="transcript" id="transcript">
+      <div class="empty">No negotiation seen yet — run agents/hirer.ts to start one.</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" style="margin-top:1.5rem">
+  <h2>Task &amp; verdict — why the hirer accepted or rejected</h2>
+  <div class="transcript" id="verdicts">
+    <div class="empty">No delivery judged yet.</div>
+  </div>
+</div>
+
+<script type="module">
+import { createPublicClient, http, defineChain } from "https://esm.sh/viem@2.40.0";
+
+const monadTestnet = defineChain({
+  id: 10143,
+  name: "Monad Testnet",
+  nativeCurrency: { name: "MON", symbol: "MON", decimals: 18 },
+  rpcUrls: { default: { http: ["https://testnet-rpc.monad.xyz"] } },
+});
+
+const CONTRACT_ADDRESS = "0xb774f275b73a02D3E89F58cDb3f48a6e6feA6F39";
+const NEGOTIATION_URL = "http://127.0.0.1:4021/transcript";
+const VERDICT_URL = "http://127.0.0.1:4021/verdict";
+
+const abi = [
+  {
+    type: "function", name: "getEscrow",
+    inputs: [{ name: "escrowId", type: "uint256" }],
+    outputs: [
+      { name: "hirer", type: "address" },
+      { name: "worker", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "status", type: "uint8" },
+      { name: "resultHash", type: "string" },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function", name: "escrowCount",
+    inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view",
+  },
+  {
+    type: "event", name: "EscrowCreated",
+    inputs: [
+      { name: "escrowId", type: "uint256", indexed: true },
+      { name: "hirer", type: "address", indexed: true },
+      { name: "worker", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "deadline", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event", name: "WorkSubmitted",
+    inputs: [
+      { name: "escrowId", type: "uint256", indexed: true },
+      { name: "worker", type: "address", indexed: true },
+      { name: "resultHash", type: "string", indexed: false },
+    ],
+  },
+  {
+    type: "event", name: "Released",
+    inputs: [
+      { name: "escrowId", type: "uint256", indexed: true },
+      { name: "worker", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event", name: "Refunded",
+    inputs: [
+      { name: "escrowId", type: "uint256", indexed: true },
+      { name: "hirer", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+];
+
+const STATUS_NAME = { 0: "None", 1: "Created", 2: "Submitted", 3: "Released", 4: "Refunded" };
+const fmtMon = (wei) => (Number(wei) / 1e18).toString() + " MON";
+const short = (addr) => addr.slice(0, 6) + "…" + addr.slice(-4);
+
+const client = createPublicClient({ chain: monadTestnet, transport: http() });
+
+const chainStatusEl = document.getElementById("chain-status");
+const escrowKvEl = document.getElementById("escrow-kv");
+const flowHirerEl = document.getElementById("flow-hirer");
+const flowWorkerEl = document.getElementById("flow-worker");
+const flowArrowEl = document.getElementById("flow-arrow");
+const eventLogEl = document.getElementById("event-log");
+const stepEls = Array.from(document.querySelectorAll(".step"));
+
+function setStatusOnline() {
+  chainStatusEl.innerHTML = '<span class="status-dot dot-live"></span>live on Monad testnet';
+}
+
+function logLine(text) {
+  const el = document.createElement("div");
+  el.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+  eventLogEl.prepend(el);
+}
+
+function renderEscrow(escrowId, e) {
+  escrowKvEl.innerHTML = `
+    <dt>escrow id</dt><dd>#${escrowId}</dd>
+    <dt>hirer</dt><dd>${short(e.hirer)}</dd>
+    <dt>worker</dt><dd>${short(e.worker)}</dd>
+    <dt>amount</dt><dd class="mono-amount">${fmtMon(e.amount)}</dd>
+    <dt>status</dt><dd>${STATUS_NAME[e.status] ?? e.status}</dd>
+  `;
+
+  stepEls.forEach((el) => el.classList.remove("active", "done", "refunded"));
+  if (e.status === 1) stepEls[0].classList.add("active");
+  if (e.status === 2) { stepEls[0].classList.add("done"); stepEls[1].classList.add("active"); }
+  if (e.status === 3) { stepEls[0].classList.add("done"); stepEls[1].classList.add("done"); stepEls[2].classList.add("active"); }
+  if (e.status === 4) { stepEls[0].classList.add("refunded"); }
+
+  const amount = fmtMon(e.amount);
+  if (e.status === 3) {
+    flowHirerEl.textContent = "0 MON";
+    flowWorkerEl.textContent = amount;
+    flowArrowEl.classList.add("hot");
+  } else if (e.status === 4) {
+    flowHirerEl.textContent = amount;
+    flowWorkerEl.textContent = "0 MON";
+    flowArrowEl.classList.remove("hot");
+  } else {
+    flowHirerEl.textContent = "0 MON (locked)";
+    flowWorkerEl.textContent = "pending";
+    flowArrowEl.classList.remove("hot");
+  }
+}
+
+// Same reliable pattern as sdk/events.ts: explicit fromBlock/toBlock cursor,
+// never back-scan, poll every ~1s. watchContractEvent was flaky in testing.
+// MAX_BLOCK_SPAN mirrors the fix in sdk/events.ts: Monad's public RPC hard-caps
+// eth_getLogs at 100 blocks, and a poll timeout that doesn't advance fromBlock
+// can otherwise let the requested range grow past that cap and wedge forever.
+const MAX_BLOCK_SPAN = 99n;
+let fromBlock;
+async function poll() {
+  try {
+    const latest = await client.getBlockNumber();
+    setStatusOnline();
+
+    if (fromBlock === undefined) {
+      fromBlock = latest + 1n;
+    } else if (latest >= fromBlock) {
+      const toBlock = latest - fromBlock > MAX_BLOCK_SPAN ? fromBlock + MAX_BLOCK_SPAN : latest;
+      const logs = await client.getContractEvents({ address: CONTRACT_ADDRESS, abi, fromBlock, toBlock });
+      for (const log of logs) {
+        const { eventName, args } = log;
+        if (eventName === "EscrowCreated") {
+          logLine(`EscrowCreated #${args.escrowId} — ${fmtMon(args.amount)} locked for ${short(args.worker)}`);
+        } else if (eventName === "WorkSubmitted") {
+          logLine(`WorkSubmitted #${args.escrowId} — ${args.resultHash}`);
+        } else if (eventName === "Released") {
+          logLine(`Released #${args.escrowId} — ${fmtMon(args.amount)} paid to ${short(args.worker)}`);
+        } else if (eventName === "Refunded") {
+          logLine(`Refunded #${args.escrowId} — ${fmtMon(args.amount)} returned to ${short(args.hirer)}`);
+        }
+
+        if (args.escrowId !== undefined) {
+          const e = await client.readContract({ address: CONTRACT_ADDRESS, abi, functionName: "getEscrow", args: [args.escrowId] });
+          renderEscrow(args.escrowId.toString(), {
+            hirer: e[0], worker: e[1], amount: e[2], deadline: e[3], status: e[4], resultHash: e[5],
+          });
+        }
+      }
+      fromBlock = toBlock + 1n;
+    }
+  } catch (err) {
+    logLine(`poll error: ${err.message}`);
+  } finally {
+    setTimeout(poll, 1000);
+  }
+}
+
+// Negotiation transcript, polled from worker.ts's local HTTP server.
+const transcriptEl = document.getElementById("transcript");
+const workerStatusEl = document.getElementById("worker-status");
+let lastTranscriptLength = 0;
+
+function renderTranscript(entries) {
+  if (entries.length === 0) return;
+  transcriptEl.innerHTML = "";
+  entries.forEach((t) => {
+    const hirerTurn = document.createElement("div");
+    hirerTurn.className = "turn hirer";
+    hirerTurn.innerHTML = `<span class="who hirer-c">Hirer</span> — round ${t.round}, offers <b>${t.hirerOfferMon} MON</b>`;
+    transcriptEl.appendChild(hirerTurn);
+
+    const workerTurn = document.createElement("div");
+    workerTurn.className = "turn worker";
+    workerTurn.innerHTML = `<span class="who worker-c">Worker</span> — round ${t.round}, ` +
+      (t.workerAccepted ? `<b>accepts at ${t.hirerOfferMon} MON</b>` : `counters <b>${t.workerCounterOfferMon} MON</b>`) +
+      `<div class="msg">"${t.workerMessage}"</div>`;
+    transcriptEl.appendChild(workerTurn);
+  });
+}
+
+async function pollTranscript() {
+  try {
+    const res = await fetch(NEGOTIATION_URL);
+    if (res.ok) {
+      workerStatusEl.innerHTML = '<span class="status-dot dot-live"></span>worker.ts connected';
+      const entries = await res.json();
+      if (entries.length !== lastTranscriptLength) {
+        lastTranscriptLength = entries.length;
+        renderTranscript(entries);
+      }
+    }
+  } catch (err) {
+    workerStatusEl.innerHTML = '<span class="status-dot dot-off"></span>worker.ts not reachable on :4021';
+  } finally {
+    setTimeout(pollTranscript, 1000);
+  }
+}
+
+// Task & verdict feed — the hirer's reasoning for accepting/rejecting a
+// delivery, pushed by hirer.ts to worker.ts's server purely for this
+// dashboard. Not part of the trust flow itself (that's on-chain), just why.
+const verdictsEl = document.getElementById("verdicts");
+let lastVerdictsLength = 0;
+
+function renderVerdicts(entries) {
+  if (entries.length === 0) return;
+  verdictsEl.innerHTML = "";
+  entries.forEach((v) => {
+    const card = document.createElement("div");
+    card.className = "verdict-card " + (v.satisfactory ? "pass" : "fail");
+    card.innerHTML = `
+      <span class="badge ${v.satisfactory ? "pass" : "fail"}">${v.satisfactory ? "ACCEPTED" : "REJECTED"}</span>
+      <span style="color:#8a8f98; font-size:0.8rem"> — escrow #${v.escrowId}</span>
+      <div class="label">Task</div>
+      <p class="task-text">${v.task}</p>
+      <div class="label">Delivered</div>
+      <p class="deliverable-text">${v.deliverable}</p>
+      <div class="label">Hirer's reasoning</div>
+      <p class="reasoning">"${v.reasoning}"</p>
+    `;
+    verdictsEl.appendChild(card);
+  });
+}
+
+async function pollVerdicts() {
+  try {
+    const res = await fetch(VERDICT_URL);
+    if (res.ok) {
+      const entries = await res.json();
+      if (entries.length !== lastVerdictsLength) {
+        lastVerdictsLength = entries.length;
+        renderVerdicts(entries);
+      }
+    }
+  } catch (err) {
+    // worker.ts not reachable — already surfaced by pollTranscript's status indicator
+  } finally {
+    setTimeout(pollVerdicts, 1000);
+  }
+}
+
+poll();
+pollTranscript();
+pollVerdicts();
+</script>
+</body>
+</html>

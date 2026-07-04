@@ -3,8 +3,37 @@ import http from "node:http";
 import { agentFromPrivateKey } from "../sdk/client.js";
 import { submitWork } from "../sdk/escrow.js";
 import { watchSettldEvents } from "../sdk/events.js";
-import { RESULT_HASH, NEGOTIATION_PORT } from "./config.js";
+import { TASK_DESCRIPTION, NEGOTIATION_PORT } from "./config.js";
 import { workerRespond, type NegotiateRequest } from "./negotiate.js";
+import { generateDeliverable } from "./task.js";
+
+/// One transcript entry per negotiation round, from the worker's vantage
+/// point (it sees both the hirer's offer and its own reply each round) —
+/// exposed via GET /transcript so a browser dashboard can poll it live.
+/// Purely additive for the temporary test dashboard; doesn't affect the
+/// negotiation logic itself.
+interface TranscriptEntry {
+  round: number;
+  hirerOfferMon: number;
+  workerAccepted: boolean;
+  workerCounterOfferMon: number;
+  workerMessage: string;
+}
+const transcript: TranscriptEntry[] = [];
+
+/// One entry per escrow's judge verdict, pushed here by hirer.ts purely so
+/// the dashboard can show the task, the delivered content, and *why* the
+/// hirer did or didn't approve — none of this reasoning lives on-chain or
+/// affects the actual approveAndRelease / reclaimAfterTimeout decision,
+/// which hirer.ts has already made by the time it POSTs this.
+interface VerdictEntry {
+  escrowId: string;
+  task: string;
+  deliverable: string;
+  satisfactory: boolean;
+  reasoning: string;
+}
+const verdicts: VerdictEntry[] = [];
 
 /// Pre-escrow negotiation channel. There's no contract yet at this point, so
 /// hirer.ts and worker.ts talk price over a plain local HTTP call instead of
@@ -12,6 +41,34 @@ import { workerRespond, type NegotiateRequest } from "./negotiate.js";
 /// to being purely event-driven, same as Layer 3.
 function startNegotiationServer(): void {
   const server = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/transcript") {
+      res
+        .writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" })
+        .end(JSON.stringify(transcript));
+      return;
+    }
+
+    if (req.method === "GET" && req.url === "/verdict") {
+      res
+        .writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" })
+        .end(JSON.stringify(verdicts));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/verdict") {
+      let vBody = "";
+      req.on("data", (chunk) => (vBody += chunk));
+      req.on("end", () => {
+        try {
+          verdicts.push(JSON.parse(vBody) as VerdictEntry);
+          res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }).end("{}");
+        } catch (err) {
+          res.writeHead(400).end(JSON.stringify({ error: String(err) }));
+        }
+      });
+      return;
+    }
+
     if (req.method !== "POST" || req.url !== "/negotiate") {
       res.writeHead(404).end();
       return;
@@ -28,6 +85,14 @@ function startNegotiationServer(): void {
         console.log(
           `[worker] [negotiation round ${parsed.round}] ${decision.accept ? "accepts" : `counters ${decision.counterOfferMon} MON`} — "${decision.message}"`,
         );
+
+        transcript.push({
+          round: parsed.round,
+          hirerOfferMon: parsed.hirerOfferMon,
+          workerAccepted: decision.accept,
+          workerCounterOfferMon: decision.counterOfferMon,
+          workerMessage: decision.message,
+        });
 
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(decision));
       } catch (err) {
@@ -67,23 +132,33 @@ async function main() {
     );
   });
 
-  console.log("[worker] doing the work...");
-  await new Promise((r) => setTimeout(r, 2000)); // simulated task execution
+  console.log(`[worker] doing the work — task: "${TASK_DESCRIPTION}"`);
+  const deliverable = await generateDeliverable(TASK_DESCRIPTION);
+  console.log("[worker] deliverable produced:");
+  console.log(`  ${deliverable.replace(/\n/g, "\n  ")}`);
 
-  console.log(`[worker] submitting result: ${RESULT_HASH}`);
-  await submitWork(worker, escrowId, RESULT_HASH);
+  console.log("[worker] submitting deliverable on-chain...");
+  await submitWork(worker, escrowId, deliverable);
   console.log("[worker] submitted, waiting for hirer to release payment...");
 
+  // Watch for either outcome — the hirer's judge may reject the deliverable
+  // and let the deadline pass instead of approving. Waiting on Released alone
+  // would hang forever in that case.
   await new Promise<void>((resolve) => {
     const unwatch = watchSettldEvents(
       worker,
       (event) => {
-        if (event.name !== "Released") return;
         if ((event.args.escrowId as bigint) !== escrowId) return;
 
-        console.log(`[worker] payment released: ${Number(event.args.amount as bigint) / 1e18} MON received`);
-        unwatch();
-        resolve();
+        if (event.name === "Released") {
+          console.log(`[worker] payment released: ${Number(event.args.amount as bigint) / 1e18} MON received`);
+          unwatch();
+          resolve();
+        } else if (event.name === "Refunded") {
+          console.log(`[worker] escrow refunded to hirer instead — the deliverable wasn't approved. No payment received.`);
+          unwatch();
+          resolve();
+        }
       },
       (err) => console.error("[worker] watch error:", err.message),
     );
